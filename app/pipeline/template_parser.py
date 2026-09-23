@@ -39,7 +39,9 @@ class PlaceholderSpec:
 
 @dataclass
 class LayoutSpec:
-    index: int
+    index: int             # global id across ALL masters — unique key into DesignSystem.layouts
+    master_index: int      # which prs.slide_masters[...] this layout actually belongs to
+    layout_idx_in_master: int  # its index within that master's own .slide_layouts collection
     name: str
     role: str  # classified composition pattern, see _classify_layout
     placeholders: list[PlaceholderSpec] = field(default_factory=list)
@@ -112,6 +114,24 @@ def _classify_layout(placeholders: list[PlaceholderSpec], name_hint: str, slide_
     if not content:
         return "blank"
 
+    name_l_early = name_hint.lower()
+    if any(k in name_l_early for k in ("спасибо", "thank you", "thanks")):
+        # A closing/"thank you" slide must never be picked for ordinary
+        # mid-deck content — without this override it can structurally look
+        # just like any other title+body(+body) layout and get reused for
+        # regular sections, which is a real semantic bug, not a cosmetic one.
+        return "closing"
+
+    if any(k in name_l_early for k in ("титульн", "title slide", "cover slide")):
+        # Decks authored in Google Slides and exported to .pptx don't carry
+        # PowerPoint's native CENTER_TITLE placeholder type, so the
+        # structural check below never fires for them — but "Титульный
+        # слайд" is an unambiguous, deliberate naming convention worth
+        # trusting outright, even when the layout also has a richer bio-card
+        # composition (photo + name + role) that would otherwise look like
+        # a two_content layout.
+        return "title_slide"
+
     center_titles = [p for p in content if p.type in CENTER_TITLE_TYPES]
     titles = [p for p in content if p.type in TITLE_TYPES]
     subtitles = [p for p in content if p.type in SUBTITLE_TYPES]
@@ -138,8 +158,16 @@ def _classify_layout(placeholders: list[PlaceholderSpec], name_hint: str, slide_
         return "title_only"
 
     if len(bodies) >= 2:
-        xs = sorted({p.left for p in bodies})
-        if len(xs) >= 2:
+        # Group by x position with a tolerance, so placeholders that are
+        # merely stacked vertically (their left edges differ only by a
+        # rounding artefact of a few EMU — common in decks exported from
+        # Google Slides) aren't mistaken for genuine side-by-side columns.
+        tolerance = max(int((slide_height or 0) * 0.02), 50_000)
+        distinct_columns: list[int] = []
+        for p in sorted(bodies, key=lambda b: b.left or 0):
+            if not distinct_columns or (p.left or 0) - distinct_columns[-1] > tolerance:
+                distinct_columns.append(p.left or 0)
+        if len(distinct_columns) >= 2:
             return "comparison" if any(k in name_l for k in ("compar", "сравнен")) else "two_content"
 
     if all_titles and bodies:
@@ -158,25 +186,46 @@ def _classify_layout(placeholders: list[PlaceholderSpec], name_hint: str, slide_
 
 
 def _extract_layouts(prs: Presentation) -> tuple[list[LayoutSpec], dict[str, list[int]]]:
+    """Walks EVERY slide master's own .slide_layouts collection.
+
+    ``Presentation.slide_layouts`` in python-pptx is a shortcut for
+    ``slide_masters[0].slide_layouts`` only — a template with more than one
+    master (common in decks originally built in Google Slides and exported
+    to .pptx, which is exactly this project's target templates) silently
+    loses every layout on its other masters if you iterate that shortcut
+    instead of the masters themselves.
+    """
     layouts: list[LayoutSpec] = []
-    for idx, layout in enumerate(prs.slide_layouts):
-        phs = []
-        for ph in layout.placeholders:
-            pf = ph.placeholder_format
-            type_name = pf.type.name if pf.type is not None else "UNKNOWN"
-            phs.append(
-                PlaceholderSpec(
-                    idx=pf.idx,
-                    type=type_name,
-                    name=ph.name,
-                    left=ph.left or 0,
-                    top=ph.top or 0,
-                    width=ph.width or 0,
-                    height=ph.height or 0,
+    idx = 0
+    for master_index, master in enumerate(prs.slide_masters):
+        for layout_idx_in_master, layout in enumerate(master.slide_layouts):
+            phs = []
+            for ph in layout.placeholders:
+                pf = ph.placeholder_format
+                type_name = pf.type.name if pf.type is not None else "UNKNOWN"
+                phs.append(
+                    PlaceholderSpec(
+                        idx=pf.idx,
+                        type=type_name,
+                        name=ph.name,
+                        left=ph.left or 0,
+                        top=ph.top or 0,
+                        width=ph.width or 0,
+                        height=ph.height or 0,
+                    )
+                )
+            role = _classify_layout(phs, layout.name or "", prs.slide_height)
+            layouts.append(
+                LayoutSpec(
+                    index=idx,
+                    master_index=master_index,
+                    layout_idx_in_master=layout_idx_in_master,
+                    name=layout.name or f"Layout {idx}",
+                    role=role,
+                    placeholders=phs,
                 )
             )
-        role = _classify_layout(phs, layout.name or "", prs.slide_height)
-        layouts.append(LayoutSpec(index=idx, name=layout.name or f"Layout {idx}", role=role, placeholders=phs))
+            idx += 1
 
     roles: dict[str, list[int]] = defaultdict(list)
     for l in layouts:
@@ -241,7 +290,8 @@ def _extract_type_scale(prs: Presentation) -> list[float]:
                 if r.font.size is not None:
                     sizes[r.font.size.pt] += 1
 
-    containers = list(prs.slide_masters) + list(prs.slide_layouts) + list(prs.slides)
+    all_layouts = [layout for master in prs.slide_masters for layout in master.slide_layouts]
+    containers = list(prs.slide_masters) + all_layouts + list(prs.slides)
     for container in containers:
         for shape in container.shapes:
             if shape.has_text_frame:
@@ -288,6 +338,35 @@ def _extract_logo_boxes(prs: Presentation) -> list[LogoBox]:
         for shape in master.shapes:
             if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
                 boxes.append(LogoBox(left=shape.left or 0, top=shape.top or 0, width=shape.width or 0, height=shape.height or 0))
+    if boxes:
+        return boxes
+
+    # Some decks (notably ones authored in Google Slides and exported to
+    # .pptx) leave the masters themselves empty and instead repeat brand
+    # elements — a logo, a footer mark — on every individual layout. A
+    # decorative shape recurring at (roughly) the same position across
+    # several layouts is almost certainly one of those, as opposed to
+    # one-off content that happens to live at that spot on a single layout.
+    slide_w, slide_h = prs.slide_width, prs.slide_height
+    position_counts: Counter[tuple[int, int, int, int]] = Counter()
+    for master in prs.slide_masters:
+        for layout in master.slide_layouts:
+            for shape in layout.shapes:
+                if shape.shape_type not in (MSO_SHAPE_TYPE.PICTURE, MSO_SHAPE_TYPE.GROUP):
+                    continue
+                if not (shape.width and shape.height):
+                    continue
+                # a shape covering (almost) the whole slide is a repeated
+                # background, not a logo — exclude it here
+                if shape.width >= slide_w * 0.9 and shape.height >= slide_h * 0.9:
+                    continue
+                # round to tolerate tiny sub-EMU drift between otherwise-identical copies
+                key = (round((shape.left or 0) / 10000), round((shape.top or 0) / 10000), shape.width, shape.height)
+                position_counts[key] += 1
+
+    recurring = [key for key, count in position_counts.items() if count >= 3]
+    for left_r, top_r, width, height in recurring:
+        boxes.append(LogoBox(left=left_r * 10000, top=top_r * 10000, width=width, height=height))
     return boxes
 
 

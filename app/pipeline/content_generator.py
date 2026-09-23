@@ -286,7 +286,12 @@ def _fallback_plan(
             )
         )
 
-    closing_role = "section_header" if "section_header" in available_roles else body_role
+    if "closing" in available_roles:
+        closing_role = "closing"
+    elif "section_header" in available_roles:
+        closing_role = "section_header"
+    else:
+        closing_role = body_role
     slides.append(
         SlidePlanItem(
             layout_role=closing_role,

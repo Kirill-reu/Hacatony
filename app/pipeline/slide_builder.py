@@ -333,7 +333,8 @@ def build_variant_deck(
         layout_spec = design_system.best_layout_for(item.layout_role, fallback_roles=fallback_role_order)
         if layout_spec is None:
             layout_spec = design_system.layouts[0]
-        slide = prs.slides.add_slide(prs.slide_layouts[layout_spec.index])
+        actual_layout = prs.slide_masters[layout_spec.master_index].slide_layouts[layout_spec.layout_idx_in_master]
+        slide = prs.slides.add_slide(actual_layout)
         _fill_slide(
             slide,
             layout_spec,
