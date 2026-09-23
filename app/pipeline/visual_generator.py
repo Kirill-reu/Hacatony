@@ -31,6 +31,22 @@ _NUMBER_RE = re.compile(r"-?\d[\d\s]*[.,]?\d*")
 _MAX_CHART_SERIES_POINTS = 5   # Приложение 1: "больше 5 серий на диаграмме" is flagged
 _MAX_TABLE_ROWS = 7            # Приложение 1: "таблица больше 7 строк"
 
+# Dates read as plausible-looking numbers to the regex above (a "13" and a
+# "2026" out of "Aug 13, 2026" are, individually, valid floats) but are
+# never a real metric — observed in practice turning a page's publish date
+# into a chart's "values". Stripped from the source text before extraction
+# runs, rather than filtered after, so the surrounding words used as a
+# label also stop being date fragments.
+_DATE_LIKE_RE = re.compile(
+    r"\b(?:"
+    r"\d{1,2}[./]\d{1,2}[./]\d{2,4}"  # 13.08.2026, 13/08/26
+    r"|\d{4}-\d{2}-\d{2}"  # 2026-08-13
+    r"|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s*\d{4}"  # Aug 13, 2026
+    r"|\d{1,2}\s+(?:январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)\w*\s+\d{4}"  # 13 августа 2026
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class ChartSpec:
@@ -55,15 +71,27 @@ class TableSpec:
 
 def _numbers_with_context(text: str) -> list[tuple[str, float]]:
     """Pairs each number found in ``text`` with a short label taken from the
-    words immediately before it, e.g. "выручка выросла на 23%" -> ("выручка выросла на", 23.0)."""
+    words immediately before it, e.g. "выручка выросла на 23%" -> ("выручка выросла на", 23.0).
+
+    Two defensive exclusions, both hardened against real observed garbage
+    (a "Aug 13, 2026 · grok4.7" web-search snippet turning into chart data
+    with a category list of date fragments and a values list of [13, 2026,
+    4.7, ...]): dates are stripped before matching starts, and a number
+    glued directly onto a preceding letter (a version string, product code,
+    "top10", ...) is skipped rather than treated as a standalone metric.
+    """
+    text = _DATE_LIKE_RE.sub(" ", text)
     out: list[tuple[str, float]] = []
     for m in _NUMBER_RE.finditer(text):
+        start = m.start()
+        if start > 0 and text[start - 1].isalpha():
+            continue
         raw = m.group().replace(" ", "").replace(",", ".")
         try:
             value = float(raw)
         except ValueError:
             continue
-        label = text[: m.start()].strip().split()[-4:]
+        label = text[:start].strip().split()[-4:]
         label_str = " ".join(label) if label else text[m.end() : m.end() + 30].strip()
         out.append((label_str or "значение", value))
     return out
@@ -136,8 +164,13 @@ def _values_traceable(values: list[float], source_text: str) -> bool:
 
 
 def build_table_spec(hint: str, facts: list[SearchResult], language: str) -> TableSpec | None:
-    source_text = hint or " ".join(f"{f.title}: {f.snippet}" for f in facts[:_MAX_TABLE_ROWS])
-    pairs = _numbers_with_context(source_text)[:_MAX_TABLE_ROWS]
+    # _MAX_TABLE_ROWS (7, per Приложение 1: "таблица больше 7 строк") counts
+    # the WHOLE pptx table including its header row — python-pptx's
+    # table.rows, which the audit checks against, does the same. Cap data
+    # rows one short of that so header + data never exceeds the limit.
+    max_data_rows = _MAX_TABLE_ROWS - 1
+    source_text = hint or " ".join(f"{f.title}: {f.snippet}" for f in facts[:max_data_rows])
+    pairs = _numbers_with_context(source_text)[:max_data_rows]
     if pairs:
         headers = ["Показатель", "Значение"] if language.startswith("ru") else ["Metric", "Value"]
         rows = [[label[:40], _format_number(value)] for label, value in pairs]
@@ -145,7 +178,7 @@ def build_table_spec(hint: str, facts: list[SearchResult], language: str) -> Tab
 
     if facts:
         headers = ["Источник", "Факт"] if language.startswith("ru") else ["Source", "Fact"]
-        rows = [[f.title[:40], f.snippet[:90]] for f in facts[:_MAX_TABLE_ROWS]]
+        rows = [[f.title[:40], f.snippet[:90]] for f in facts[:max_data_rows]]
         return TableSpec(headers=headers, rows=rows, source_note="")
     return None
 

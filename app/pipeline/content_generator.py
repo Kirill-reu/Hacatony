@@ -148,7 +148,7 @@ def generate_plan(
     language: str,
     variant: VariantParams,
 ) -> tuple[SlidePlan, list[SearchResult]]:
-    facts = gather_facts(provider, _search_topics(brief, language))
+    facts = gather_facts(provider, _search_topics(brief, language), language=language)
     available_roles = sorted(design_system.layout_roles.keys()) or ["generic"]
 
     plan: SlidePlan | None = None
