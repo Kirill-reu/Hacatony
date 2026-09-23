@@ -42,7 +42,11 @@ _DATE_LIKE_RE = re.compile(
     r"\d{1,2}[./]\d{1,2}[./]\d{2,4}"  # 13.08.2026, 13/08/26
     r"|\d{4}-\d{2}-\d{2}"  # 2026-08-13
     r"|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s*\d{4}"  # Aug 13, 2026
-    r"|\d{1,2}\s+(?:январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)\w*\s+\d{4}"  # 13 августа 2026
+    # Month stems kept to their shortest common prefix (e.g. "авг" rather
+    # than "август") on purpose: that prefix matches both the full word
+    # ("августа") and the abbreviated form web snippets actually use
+    # ("авг."), with \w*\.? soaking up whatever letters/period follow.
+    r"|\d{1,2}\s+(?:янв|фев|мар|апр|ма[йя]|июн|июл|авг|сен|окт|ноя|дек)\w*\.?\s+\d{4}\s*г?\.?"  # 13 августа 2026, 3 июн. 2025 г.
     r")\b",
     re.IGNORECASE,
 )
