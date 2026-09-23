@@ -74,6 +74,29 @@ def _pick_accent(design_system: DesignSystem) -> str:
 # --------------------------------------------------------------------------
 
 
+_PICTURE_STENCIL_HINTS = ("вставить фото", "insert photo", "вставить изображение", "add photo", "add image")
+
+
+def _find_picture_stencil_box(actual_layout) -> tuple[int, int, int, int] | None:
+    """This template (like several decks authored in Google Slides) marks
+    where a photo goes with an ordinary text box reading "Вставить фото" —
+    not a real PICTURE-type placeholder. Because it isn't a placeholder,
+    ``add_slide(layout)`` never copies it onto the new slide at all (only
+    placeholders are; a layout's plain decorative/static shapes stay only
+    on the layout and are otherwise just inherited visually) — so it's
+    invisible to ``slide.shapes`` and, before this, silently ignored.
+    Reads its position straight off the layout instead, so a real picture
+    can be dropped in the same spot on the slide.
+    """
+    for shape in actual_layout.shapes:
+        if shape.is_placeholder or not shape.has_text_frame:
+            continue
+        text = shape.text_frame.text.strip().lower()
+        if any(hint in text for hint in _PICTURE_STENCIL_HINTS) and shape.width and shape.height:
+            return shape.left or 0, shape.top or 0, shape.width, shape.height
+    return None
+
+
 def _match_slide_placeholders(slide, layout_spec: LayoutSpec):
     by_idx = {ph.placeholder_format.idx: ph for ph in slide.placeholders}
     title = None
@@ -138,8 +161,39 @@ def _set_bullets(placeholder, bullets: list[str]) -> None:
 # --------------------------------------------------------------------------
 
 
-def _replace_with_chart(slide, placeholder, spec, accent_hex: str) -> bool:
-    left, top, width, height = placeholder.left, placeholder.top, placeholder.width, placeholder.height
+_MIN_CHART_HEIGHT_EMU = int(2.2 * 914400)   # ~2.2in — below this a chart just looks like a squashed sliver
+_MIN_TABLE_ROW_HEIGHT_EMU = 320000          # ~0.35in per row, a legible minimum
+_MIN_IMAGE_HEIGHT_EMU = int(2.3 * 914400)   # ~2.3in — same box-too-small problem as charts/tables
+
+
+def _grow_box(box: tuple[int, int, int, int], design_system: DesignSystem, desired_height: int) -> tuple[int, int, int, int]:
+    """Charts and tables need real vertical space. Several of this
+    template's layouts ('1_Разделитель', '1_Визитка', ...) offer only a
+    single-line subtitle placeholder for "body" content — fine for a short
+    line of bullets, nowhere near tall enough for a 7-row table or a chart.
+    python-pptx will happily create either at whatever tiny size you hand
+    it; the shape then renders at its own real (much taller) natural size
+    on the actual slide and overflows straight over whatever sits below it
+    — which is exactly the "съезжает" overflow this fixes.
+
+    Grows the placeholder's height toward ``desired_height``, extending
+    downward within the slide's own bottom margin. Never shrinks a
+    placeholder that was already big enough, and never pushes past the
+    bottom margin even if that means falling short of ``desired_height``.
+    """
+    left, top, width, height = box
+    bottom_margin = design_system.margins_emu.get("bottom", int(design_system.slide_height * 0.05))
+    available_below = max(design_system.slide_height - top - bottom_margin, height)
+    new_height = min(max(height, desired_height), available_below)
+    return left, top, width, new_height
+
+
+def _placeholder_box(placeholder) -> tuple[int, int, int, int]:
+    return placeholder.left or 0, placeholder.top or 0, placeholder.width or 0, placeholder.height or 0
+
+
+def _replace_with_chart(slide, placeholder, spec, accent_hex: str, design_system: DesignSystem) -> bool:
+    left, top, width, height = _grow_box(_placeholder_box(placeholder), design_system, _MIN_CHART_HEIGHT_EMU)
     try:
         chart_data = CategoryChartData()
         chart_data.categories = spec.categories
@@ -168,10 +222,11 @@ def _replace_with_chart(slide, placeholder, spec, accent_hex: str) -> bool:
     return True
 
 
-def _replace_with_table(slide, placeholder, spec: TableSpec, accent_hex: str) -> bool:
-    left, top, width, height = placeholder.left, placeholder.top, placeholder.width, placeholder.height
+def _replace_with_table(slide, placeholder, spec: TableSpec, accent_hex: str, design_system: DesignSystem) -> bool:
+    rows, cols = len(spec.rows) + 1, len(spec.headers)
+    desired_height = rows * _MIN_TABLE_ROW_HEIGHT_EMU
+    left, top, width, height = _grow_box(_placeholder_box(placeholder), design_system, desired_height)
     try:
-        rows, cols = len(spec.rows) + 1, len(spec.headers)
         shape = slide.shapes.add_table(rows, cols, left, top, width, height)
         table = shape.table
         for c, header in enumerate(spec.headers):
@@ -194,12 +249,16 @@ def _replace_with_table(slide, placeholder, spec: TableSpec, accent_hex: str) ->
     return True
 
 
-def _replace_with_picture(slide, placeholder, img_bytes: bytes) -> bool:
+def _replace_with_picture(slide, box: tuple[int, int, int, int], img_bytes: bytes, placeholder=None) -> bool:
+    """``box`` may come from a real placeholder OR from a stencil shape read
+    straight off the layout (see ``_find_picture_stencil_box``) — the latter
+    has no shape on the slide itself, so ``placeholder`` is None and there's
+    nothing to remove afterward."""
     import io
 
     from PIL import Image
 
-    left, top, width, height = placeholder.left, placeholder.top, placeholder.width, placeholder.height
+    left, top, width, height = box
     try:
         im = Image.open(io.BytesIO(img_bytes))
         iw, ih = im.size
@@ -215,7 +274,8 @@ def _replace_with_picture(slide, placeholder, img_bytes: bytes) -> bool:
     except Exception as exc:  # noqa: BLE001
         logger.warning("picture insertion failed: %s", exc)
         return False
-    _remove_shape(placeholder)
+    if placeholder is not None:
+        _remove_shape(placeholder)
     return True
 
 
@@ -244,6 +304,8 @@ def _fill_slide(
     facts: list[SearchResult],
     language: str,
     accent_hex: str,
+    design_system: DesignSystem,
+    actual_layout,
 ) -> None:
     title_ph, bodies, picture_ph = _match_slide_placeholders(slide, layout_spec)
     if title_ph is not None:
@@ -255,29 +317,48 @@ def _fill_slide(
     if visual.type == "chart" and bodies:
         target = bodies.pop(0)
         spec = build_chart_spec(llm, visual.hint, facts, visual.chart_type, language)
-        if not (spec and _replace_with_chart(slide, target, spec, accent_hex)):
+        if not (spec and _replace_with_chart(slide, target, spec, accent_hex, design_system)):
             bodies.insert(0, target)  # no usable data -> treat this box as a normal text well
 
     elif visual.type == "table" and bodies:
         target = bodies.pop(0)
         spec = build_table_spec(visual.hint, facts, language)
-        if not (spec and _replace_with_table(slide, target, spec, accent_hex)):
+        if not (spec and _replace_with_table(slide, target, spec, accent_hex, design_system)):
             bodies.insert(0, target)
 
     elif visual.type == "image":
-        target = picture_ph if picture_ph is not None else (bodies.pop(0) if bodies else None)
-        if target is not None:
+        box = None
+        ph_to_remove = None
+        if picture_ph is not None:
+            box = _placeholder_box(picture_ph)
+            ph_to_remove = picture_ph
+        else:
+            # No native PICTURE placeholder on this layout — check for the
+            # template's "Вставить фото" stencil convention before falling
+            # back to a text well (see _find_picture_stencil_box).
+            stencil_box = _find_picture_stencil_box(actual_layout)
+            if stencil_box is not None:
+                box = stencil_box
+            elif bodies:
+                target = bodies[0]
+                box = _placeholder_box(target)
+                ph_to_remove = target
+
+        if box is not None:
+            # Same fix as charts/tables: a one-line subtitle box (or, less
+            # often, an undersized stencil) is nowhere near tall enough for
+            # a photo to read as a photo rather than a sliver.
+            box = _grow_box(box, design_system, _MIN_IMAGE_HEIGHT_EMU)
             try:
                 img_bytes = generate_image(image_client, visual.hint or item.title)
-                if _replace_with_picture(slide, target, img_bytes):
-                    if target is picture_ph:
+                if _replace_with_picture(slide, box, img_bytes, ph_to_remove):
+                    if ph_to_remove is picture_ph:
                         picture_ph = None
-                elif target is not picture_ph:
-                    bodies.insert(0, target)
+                    elif ph_to_remove in bodies:
+                        bodies.remove(ph_to_remove)
+                # failure: nothing was removed, box's placeholder (if any) stays available below
             except Exception as exc:  # noqa: BLE001
                 logger.warning("image generation failed: %s", exc)
-                if target is not picture_ph:
-                    bodies.insert(0, target)
 
     elif visual.type == "icon_row" and bodies:
         target = bodies.pop(0)
@@ -344,6 +425,8 @@ def build_variant_deck(
             facts=facts,
             language=language,
             accent_hex=accent_hex,
+            design_system=design_system,
+            actual_layout=actual_layout,
         )
 
     return prs

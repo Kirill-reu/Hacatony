@@ -12,8 +12,9 @@ Pillow==12.1.1
 # --- LLM / image-gen client (OpenAI-compatible: VK inference gateway, Qwen, vLLM, etc.) ---
 openai==3.16.2
 
-# --- Web grounding for facts/charts (no API key required) ---
+# --- Web grounding for facts/charts/images (no API key required) ---
 duckduckgo_search==8.1.1
+requests==2.33.1   # downloads the actual image bytes for the web-image fallback
 
 # --- HTML export (chart snapshots) ---
 matplotlib==3.10.8

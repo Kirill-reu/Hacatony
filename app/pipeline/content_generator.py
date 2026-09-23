@@ -254,6 +254,11 @@ def _fallback_plan(
     n_content = max(slide_count - 2, 1)
     chunk_size = max(len(sentences) // n_content, 1)
     fact_pool = list(facts)
+    # A couple of real photos read as a deliberate visual choice; one on
+    # every slide would look like filler and slow generation down chasing
+    # image searches/downloads for no real benefit.
+    max_images = 2
+    images_used = 0
 
     section_titles_ru = ["Проблема", "Подход", "Как это работает", "Данные", "Риски и ограничения", "Дорожная карта"]
 
@@ -262,18 +267,31 @@ def _fallback_plan(
         bullets = chunk[: variant.max_bullets]
         role = two_col_role if (variant.prefer_multi_column_layouts and i % 3 == 1) else body_role
 
+        # Tries each visual type in the variant's OWN preference order and
+        # uses the first one that's actually viable here — not "does chart
+        # or table appear anywhere in the tuple", which previously meant a
+        # variant listing "image" first (like "visual") never reached it,
+        # because chart/table also appeared later in that same tuple.
         visual = VisualSpec(type="none")
-        if fact_pool and any(v in variant.preferred_visuals for v in ("chart", "table")):
-            f = fact_pool.pop(0)
-            numbers = _NUMBER_RE.findall(f.snippet)
-            if numbers and "chart" in variant.preferred_visuals:
+        for visual_kind in variant.preferred_visuals:
+            if visual_kind == "chart" and fact_pool and _NUMBER_RE.findall(fact_pool[0].snippet):
+                f = fact_pool.pop(0)
                 visual = VisualSpec(type="chart", chart_type="bar", hint=f.snippet[:160])
-            elif "table" in variant.preferred_visuals:
+                bullets = bullets + [f"{f.title}: {f.snippet[:120]}"]
+                break
+            if visual_kind == "table" and fact_pool:
+                f = fact_pool.pop(0)
                 visual = VisualSpec(type="table", hint=f.snippet[:160])
-            bullets = bullets + [f"{f.title}: {f.snippet[:120]}"]
-        elif "image" in variant.preferred_visuals and i == 0 and image_role != body_role:
-            role = image_role
-            visual = VisualSpec(type="image", hint=f"{purpose_label} — {sentences[0][:80]}")
+                bullets = bullets + [f"{f.title}: {f.snippet[:120]}"]
+                break
+            if visual_kind == "image" and images_used < max_images:
+                role = image_role
+                visual = VisualSpec(type="image", hint=f"{purpose_label} — {chunk[0][:80]}")
+                images_used += 1
+                break
+            if visual_kind == "icon_row" and bullets:
+                visual = VisualSpec(type="icon_row")
+                break
 
         title = section_titles_ru[i] if i < len(section_titles_ru) else f"{purpose_label.capitalize()}: часть {i + 1}"
         slides.append(

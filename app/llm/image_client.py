@@ -7,9 +7,15 @@ any server implementing the OpenAI ``/images/generations`` schema
 (a local Automatic1111/ComfyUI-in-front-of-an-OpenAI-shim, a vLLM image
 endpoint, a hosted API — whatever the team lands on).
 
-``PlaceholderImageClient`` is the network-free fallback: a generated
+``WebImageSearchClient`` is the middle tier: without an image-generation
+endpoint configured, a real photo pulled from a DuckDuckGo image search
+(no API key) is a much better fit for a slide than a synthetic placeholder
+— this is what actually satisfies "изображения внутри слайда" when the
+team hasn't wired up a text-to-image model yet.
+
+``PlaceholderImageClient`` is the fully network-free fallback: a generated
 gradient card with the prompt text on it, so slides that call for an
-image still render something in-place during local dev instead of a
+image still render something in-place during local dev/CI instead of a
 broken picture placeholder.
 """
 from __future__ import annotations
@@ -51,6 +57,51 @@ class OpenAICompatibleImageClient(ImageClient):
 def _round_to_supported(dim: int) -> int:
     # Most SD-family endpoints want multiples of 64 and reject arbitrary sizes.
     return max(512, (dim // 64) * 64)
+
+
+class WebImageSearchClient(ImageClient):
+    """No API key needed: searches DuckDuckGo Images for ``prompt`` and
+    downloads the first candidate that actually decodes as an image (some
+    hosts hotlink-block or serve an HTML error page instead of the file,
+    so several candidates are tried before giving up)."""
+
+    def __init__(self, region: str = "ru-ru", max_candidates: int = 6):
+        self._region = region
+        self._max_candidates = max_candidates
+
+    def generate(self, prompt: str, *, width: int = 1024, height: int = 768) -> bytes:
+        from duckduckgo_search import DDGS
+
+        with DDGS() as ddgs:
+            hits = list(ddgs.images(keywords=prompt, region=self._region, max_results=self._max_candidates))
+
+        for hit in hits:
+            url = hit.get("image")
+            if not url:
+                continue
+            data = self._try_download(url)
+            if data is not None:
+                return data
+
+        raise RuntimeError(f"no usable web image found for prompt {prompt!r}")
+
+    @staticmethod
+    def _try_download(url: str) -> bytes | None:
+        import requests
+        from PIL import Image
+
+        try:
+            resp = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+            resp.raise_for_status()
+            data = resp.content
+            # Validate it actually decodes as an image before handing it
+            # back — a blocked/HTML "image" response would otherwise crash
+            # slide_builder much later, far from this obvious cause.
+            Image.open(io.BytesIO(data)).verify()
+            return data
+        except Exception as exc:  # noqa: BLE001 — a single bad candidate just tries the next one
+            logger.debug("WebImageSearchClient: candidate %r failed (%s)", url, exc)
+            return None
 
 
 class PlaceholderImageClient(ImageClient):
@@ -97,4 +148,6 @@ def build_image_client() -> ImageClient:
             api_key=settings.image_api_key,
             model=settings.image_model,
         )
+    if settings.web_search_enabled:
+        return WebImageSearchClient(region=settings.web_search_region)
     return PlaceholderImageClient()

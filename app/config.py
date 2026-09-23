@@ -48,6 +48,11 @@ class Settings:
     # --- web data provider ---------------------------------------------
     web_search_enabled: bool = _bool("WEB_SEARCH_ENABLED", "true")
     web_search_max_results: int = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "5"))
+    # DuckDuckGo region code (see https://duckduckgo.com/params), used for
+    # both fact search (per-request, from the deck's own `language`) and
+    # image search (built once at process start, so it can't see a
+    # per-request language — this is its fixed default).
+    web_search_region: str = os.getenv("WEB_SEARCH_REGION", "ru-ru")
 
     # --- export -----------------------------------------------------
     soffice_binary: str = os.getenv("SOFFICE_BINARY", "soffice")
