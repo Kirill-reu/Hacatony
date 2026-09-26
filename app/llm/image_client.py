@@ -37,18 +37,31 @@ class ImageClient(ABC):
 
 
 class OpenAICompatibleImageClient(ImageClient):
-    def __init__(self, base_url: str, api_key: str | None, model: str):
-        from openai import OpenAI
+    """Plain HTTP (via ``requests``) rather than the ``openai`` SDK — same
+    reasoning as ``OpenAICompatibleClient`` in text_client.py: the SDK's own
+    HTTP stack has tripped a Cloudflare bot-fingerprint block on at least
+    one popular gateway, and curl/``requests`` are unaffected."""
 
-        self._client = OpenAI(base_url=base_url, api_key=api_key or "unused")
+    def __init__(self, base_url: str, api_key: str | None, model: str):
+        self._base_url = base_url.rstrip("/")
+        self._api_key = api_key
         self._model = model
 
     def generate(self, prompt: str, *, width: int = 1024, height: int = 768) -> bytes:
         import base64
 
+        import requests
+
         size = f"{_round_to_supported(width)}x{_round_to_supported(height)}"
-        resp = self._client.images.generate(model=self._model, prompt=prompt, size=size, n=1)
-        b64 = resp.data[0].b64_json
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        payload = {"model": self._model, "prompt": prompt, "size": size, "n": 1}
+
+        resp = requests.post(f"{self._base_url}/images/generations", headers=headers, json=payload, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        b64 = data["data"][0].get("b64_json")
         if not b64:
             raise ValueError("image endpoint returned no image data")
         return base64.b64decode(b64)

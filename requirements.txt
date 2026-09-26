@@ -3,14 +3,12 @@ fastapi==0.141.1
 uvicorn[standard]==0.53.0
 pydantic==2.13.5
 python-multipart==0.0.32   # required by FastAPI for file uploads (UploadFile)
+python-dotenv==1.2.2       # loads .env into the process environment — see app/config.py
 
 # --- Presentation parsing/building ---
 python-pptx==1.0.2
 lxml==6.0.2
 Pillow==12.1.1
-
-# --- LLM / image-gen client (OpenAI-compatible: VK inference gateway, Qwen, vLLM, etc.) ---
-openai==3.16.2
 
 # --- Web grounding for facts/charts/images (no API key required) ---
 duckduckgo_search==8.1.1

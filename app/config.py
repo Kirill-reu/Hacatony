@@ -11,6 +11,16 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+# Reads .env (if present) into the process environment BEFORE any of the
+# os.getenv() calls below run. Without this, .env is just an inert file —
+# every setting silently keeps its default (OfflineStubClient, no web
+# image search region override, ...) no matter what's written in it, which
+# is exactly what was happening: LLM_BASE_URL kept "not configured" through
+# every edit because nothing was ever loading the file at all.
+load_dotenv()
+
 
 def _bool(name: str, default: str) -> bool:
     return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}

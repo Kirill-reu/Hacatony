@@ -40,26 +40,44 @@ class LLMClient(ABC):
 
 
 class OpenAICompatibleClient(LLMClient):
-    def __init__(self, base_url: str, api_key: str | None, model: str, timeout: int):
-        from openai import OpenAI  # lazy import: keeps the offline path dependency-free
+    """Talks to the endpoint with a plain HTTP POST (via ``requests``)
+    rather than the ``openai`` SDK. Not a style choice: as of mid-2026 the
+    SDK's own HTTP client trips Cloudflare's bot-fingerprint block on at
+    least one popular OpenAI-compatible gateway (OpenRouter) — the exact
+    same request succeeds via curl or ``requests`` and fails only through
+    the SDK, which points at the TLS ClientHello fingerprint of its HTTP
+    stack rather than anything about the account, key, or request itself
+    (see https://github.com/SillyTavern/SillyTavern/issues/5825 for the
+    same failure mode from a different language's HTTP client). Plain
+    ``requests`` sidesteps that without switching providers."""
 
-        self._client = OpenAI(base_url=base_url, api_key=api_key or "unused", timeout=timeout)
+    def __init__(self, base_url: str, api_key: str | None, model: str, timeout: int):
+        self._base_url = base_url.rstrip("/")
+        self._api_key = api_key
         self._model = model
+        self._timeout = timeout
 
     def _chat(self, system: str, user: str, temperature: float, json_mode: bool) -> str:
-        kwargs: dict[str, Any] = {}
-        if json_mode:
-            kwargs["response_format"] = {"type": "json_object"}
-        resp = self._client.chat.completions.create(
-            model=self._model,
-            temperature=temperature,
-            messages=[
+        import requests
+
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "temperature": temperature,
+            "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            **kwargs,
-        )
-        return resp.choices[0].message.content or ""
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+
+        resp = requests.post(f"{self._base_url}/chat/completions", headers=headers, json=payload, timeout=self._timeout)
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"] or ""
 
     def complete_json(self, system: str, user: str, *, temperature: float = 0.7) -> dict[str, Any]:
         raw = self._chat(system, user, temperature, json_mode=True)
